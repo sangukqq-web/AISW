@@ -66,12 +66,28 @@
    ★ 설정 (여기만 수정하면 바로 작동!) ★
    ============================================================ */
 const API_KEY  = "AQ.Ab8RN6L5DS1hLMpxfVuanjJ7cYmrIxqtbXh2z3HbcK34AUtnCA";      // ← API 키를 따옴표 안에 붙여넣기
-const PROVIDER = "gemini";                  // "gemini" | "anthropic" (Claude) | "openai"
-const MODELS   = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.6-flash"];
+const PROVIDER = "gemini";                  // "gemini" | "anthropic" (Claude) | "openai" | "groq" | "openrouter" | "mistral"
+const MODELS   = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemma-4-31b-it", "gemma-4-26b-it", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.7-flash", "gemini-3.8-flash", "gemini-3-flash"];
 // ↑ 앞에서부터 시도하고, 한도 초과(429)나 모델 없음(404)이면 자동으로 다음 모델로 넘어감
-// (모델명 바꾸고 싶으면 여기만 수정. claude/openai는 첫 번째 값만 사용)
+// (모델명 바꾸고 싶으면 여기만 수정. gemini 말고 다른 회사는 첫 번째 값만 사용)
 
-                                            // (claude: "claude-haiku-5-5" / openai: "gpt-4o-mini")
+// ★ 추가 AI 회사들 (키 넣은 것만 사용됨. 위에 있는 API_KEY가 1순위, 아래는 순서대로 2순위, 3순위...)
+// 모델명은 각 회사 사이트에서 지금 쓸 수 있는 걸로 확인해서 바꿔줘 (자주 바뀜)
+const EXTRA_PROVIDERS = [
+  { provider:"groq",       key:"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", models:["llama-3.3-70b-versatile", "llama-3.1-8b-instant"] },
+  { provider:"openrouter", key:"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", models:["meta-llama/llama-3.3-70b-instruct:free"] },
+  { provider:"mistral",    key:"8c4dd515f16417b94533573db779b680", models:["mistral-small-latest"] },
+  { provider:"openai",     key:"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", models:["gpt-4o-mini"] },
+  { provider:"gemini",     key:"AQ.Ab8RN6LnAw9cTrNkizOxgMmF0Y-KAxdm98653QHzx0iBIOWkxw", models:["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"] }  // 다른 구글 계정 키도 가능
+];
+
+// OpenAI 방식을 쓰는 회사들의 주소
+const OPENAI_COMPAT = {
+  openai:     "https://api.openai.com/v1/chat/completions",
+  groq:       "https://api.groq.com/openai/v1/chat/completions",
+  openrouter: "https://openrouter.ai/api/v1/chat/completions",
+  mistral:    "https://api.mistral.ai/v1/chat/completions"
+};
 /* ============================================================ */
 
 const SYSTEM_PROMPT = `
@@ -161,7 +177,7 @@ function buildTurnHint(text){
   return "[이번 턴 지시] " + hints.join(" ");
 }
 
-async function callAI(messages, MODEL){
+async function callAI(messages, MODEL, PROVIDER, API_KEY){
   if (PROVIDER === "gemini"){
     const url = "https://generativelanguage.googleapis.com/v1beta/models/" +
       encodeURIComponent(MODEL) + ":generateContent?key=" + encodeURIComponent(API_KEY);
@@ -192,8 +208,8 @@ async function callAI(messages, MODEL){
     if (!text) throw new Error("응답이 막혔거나 비어있음 (" + (cand?.finishReason || data.promptFeedback?.blockReason || "알 수 없음") + ")");
     return text;
   }
-  if (PROVIDER === "openai"){
-    const r = await fetch("https://api.openai.com/v1/chat/completions", {
+  if (OPENAI_COMPAT[PROVIDER]){
+    const r = await fetch(OPENAI_COMPAT[PROVIDER], {
       method:"POST",
       headers:{ "Content-Type":"application/json", "Authorization":"Bearer " + API_KEY },
       body: JSON.stringify({
@@ -204,7 +220,9 @@ async function callAI(messages, MODEL){
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.error?.message || r.status);
-    return data.choices[0].message.content;
+    const text = data.choices?.[0]?.message?.content;
+    if (!text) throw new Error("응답이 비어있음 (" + PROVIDER + ")");
+    return text;
   }
   const r = await fetch("https://api.anthropic.com/v1/messages", {
     method:"POST",
@@ -221,16 +239,23 @@ async function callAI(messages, MODEL){
   return data.content.filter(b => b.type === "text").map(b => b.text).join("");
 }
 
+function getEndpoints(){
+  const eps = [{ provider:PROVIDER, key:API_KEY, models: PROVIDER === "gemini" ? MODELS : [MODELS[0]] }];
+  EXTRA_PROVIDERS.forEach(p => eps.push(p));
+  return eps.filter(e => e.key && !e.key.includes("여기에"));
+}
+
 async function callWithFallback(messages){
-  const list = PROVIDER === "gemini" ? MODELS : [MODELS[0]];
   let lastErr;
-  for (const m of list){
-    try { return await callAI(messages, m); }
-    catch(e){
-      lastErr = e;
-      const msg = String(e.message || e);
-      const skippable = /quota|rate|429|exhausted|not found|not supported|404|overloaded|unavailable|503/i.test(msg);
-      if (!skippable) throw e;
+  for (const ep of getEndpoints()){
+    for (const m of ep.models){
+      try { return await callAI(messages, m, ep.provider, ep.key); }
+      catch(e){
+        lastErr = e;
+        const msg = String(e.message || e);
+        const skippable = /quota|rate|429|exhausted|not found|not supported|404|overloaded|unavailable|503|401|403|api key|credit|billing|insufficient/i.test(msg);
+        if (!skippable) throw e;
+      }
     }
   }
   throw lastErr;
@@ -248,7 +273,7 @@ async function send(text){
     return;
   }
 
-  if (!API_KEY || API_KEY.includes("여기에")){
+  if (getEndpoints().length === 0){
     addMsg("야 코드 맨 위에 API_KEY 먼저 넣어라 ㅋ", "ai");
     return;
   }
@@ -303,4 +328,3 @@ if (history.length){
 </script>
 </body>
 </html>
-
